@@ -1,4 +1,4 @@
-module go-reliable-pg-listen-notify
+module pgln
 
 go 1.22
 
