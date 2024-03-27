@@ -12,6 +12,53 @@
 
 	go get github.com/tzahifadida/pgln
 
+## Example
+
+```
+ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+defer cancel()
+builder := pgln.NewPGListenNotifyBuilder().
+    SetContext(ctx).
+    SetReconnectInterval(5000).
+    UseConnectionString(os.Getenv("PGLN_CONNECTION_STRING"))
+
+r, err := builder.Build()
+if err != nil {
+    return
+}
+defer r.Close()
+err = r.Listen("pgln_foo", pgln.ListenOptions{
+    NotificationCallback: func(channel string, payload string) {
+        fmt.Printf("notification: %s - %s\n", channel, payload)
+        cancel()
+    },
+    DoneCallback: func(channel string) {
+        fmt.Printf("done: %s\n", channel)
+    },
+    ErrorCallback: func(channel string, err error) {
+        if !strings.Contains(err.Error(), "context canceled") {
+            fmt.Printf("error: %s - %s\n", channel, err)
+            cancel()
+        }
+    },
+    OutOfSyncBlockingCallback: func(channel string) error {
+        fmt.Printf("out-of-sync: %s\n", channel)
+        err = r.Notify("pgln_foo", "working fine")
+        if err != nil {
+            cancel()
+        }
+        return nil
+    },
+})
+if err != nil {
+    return
+}
+
+select {
+case <-ctx.Done():
+    return
+}
+```
 ## Features
 
 * Any connection string that pgxpool supports and you can set your custom pgxpool directly.
