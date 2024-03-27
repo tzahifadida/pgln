@@ -1,5 +1,13 @@
 # pgln - A Postgresql Listen/Notify library that uses [pgx](https://github.com/jackc/pgx) as the underline driver
 
+## Motivation
+
+  Postgresql Listen/Notify is a kind of rudimentary pub/sub.
+  One such usage is a simple cache synchronization to downstream services without adding more services like redis/rabbitmq.
+  The problem is that when the connection disconnects you lose notifications because it does not store notifications.
+  Therefor the technique we use is to rebuild the cache when it happens while holding the connection in listening mode so we do not lose any new notifications.
+  The library has an out-of-sync BLOCKING callback to rebuild your state while not losing new notifications.
+
 ## Install
 
 	go get github.com/tzahifadida/pgln
