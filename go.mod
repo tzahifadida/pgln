@@ -1,4 +1,4 @@
-module pgln
+module github.com/tzahifadida/pgln
 
 go 1.22
 
