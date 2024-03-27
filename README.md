@@ -1,4 +1,4 @@
-# pgln - A Postgresql Listen/Notify library that uses pgx "github.com/jackc/pgx/v5/pgxpool" as the underline driver
+# pgln - A Postgresql Listen/Notify library that uses pgx [![Github](https://godoc.org/github.com/lib/pq?status.svg)](github.com/jackc/pgx/v5/pgxpool) as the underline driver
 
 ## Install
 
