@@ -36,16 +36,20 @@ type OutOfSyncBlockingCallbackType func(channel string) error
 
 // ListenOptions is used when Listen is called. We also internally maintain state in it.
 type ListenOptions struct {
-	// NotificationCallback is an optional callback that is called for each channel when a notification arrives
+	// NotificationCallback is an optional BLOCKING callback that is called for each channel when a notification arrives.
+	// Blocking means that we leave it up to the callback to decide if everything should wait or to spawn a goroutine.
 	NotificationCallback NotificationCallbackType
-	// DoneCallback is an optional callback that is called for each channel when we are done listening.
+	// DoneCallback is an optional BLOCKING callback that is called for each channel when we are done listening.
+	// Blocking means that we leave it up to the callback to decide if everything should wait or to spawn a goroutine.
 	DoneCallback DoneCallbackType
-	// ErrorCallback is an optional callback that is called for each channel when there is an unexpected error
+	// ErrorCallback is an optional BLOCKING callback that is called for each channel when there is an unexpected error
+	// Blocking means that we leave it up to the callback to decide if everything should wait or to spawn a goroutine.
 	ErrorCallback ErrorCallbackType
 	// OutOfSyncBlockingCallback is an optional BLOCKING callback that is called for each channel when we first connect
 	// and when we reconnect. It is called just before the receiving the first notification.
-	// It allows you to catch up or rebuild your caches while we are listening for new notifications so you do not lose your messages
+	// It allows you to catch up or rebuild your caches while we are listening for new notifications, so you do not lose your messages
 	// while rebuilding.
+	// Blocking means that we leave it up to the callback to decide if everything should wait or to spawn a goroutine.
 	OutOfSyncBlockingCallback OutOfSyncBlockingCallbackType
 	channel                   string
 	executedListen            bool
@@ -54,7 +58,7 @@ type ListenOptions struct {
 
 // PGListenNotifyBuilder builds a PGListenNotify structure you can use to listen for new notifications
 type PGListenNotifyBuilder interface {
-	// SetContext allows you to set your own custom context so we can stop listening when the context is done.
+	// SetContext allows you to set your own custom context, so we can stop listening when the context is done.
 	SetContext(ctx context.Context) PGListenNotifyBuilder
 	//UseConnectionString is a pgxpool supported connection. You must specify either a pool or a connection string.
 	UseConnectionString(connectionString string) PGListenNotifyBuilder
@@ -226,7 +230,7 @@ func (r *PGListenNotify) startMonitoring() {
 				}
 				for _, channel := range removeChannels {
 					if r.channels[channel].DoneCallback != nil {
-						go r.channels[channel].DoneCallback(channel)
+						r.channels[channel].DoneCallback(channel)
 					}
 					delete(r.channels, channel)
 				}
@@ -284,14 +288,13 @@ func (r *PGListenNotify) startMonitoring() {
 			for channel, options := range r.channels {
 				if n.Channel == channel {
 					if options.NotificationCallback != nil && !options.unListenRequested {
-						go options.NotificationCallback(channel, n.Payload)
+						options.NotificationCallback(channel, n.Payload)
 					}
 				}
 			}
 			r.lock.RUnlock()
 			started = false
 		}
-		return nil
 	}
 	go func() {
 		// This is a fallback loop so that if we failed to release the wait when listening for a new channel, then after the interval it will release it.
@@ -322,7 +325,7 @@ func (r *PGListenNotify) startMonitoring() {
 				r.lock.RLock()
 				for channel, options := range r.channels {
 					if options.ErrorCallback != nil && !options.unListenRequested {
-						go options.ErrorCallback(channel, err)
+						options.ErrorCallback(channel, err)
 					}
 				}
 				r.lock.RUnlock()
@@ -334,7 +337,7 @@ func (r *PGListenNotify) startMonitoring() {
 				r.lock.RLock()
 				for channel, options := range r.channels {
 					if options.ErrorCallback != nil && !options.unListenRequested {
-						go options.ErrorCallback(channel, err)
+						options.ErrorCallback(channel, err)
 					}
 				}
 				r.lock.RUnlock()
@@ -357,7 +360,7 @@ func (r *PGListenNotify) callDoneCallbacks() {
 	r.lock.RLock()
 	for channel, options := range r.channels {
 		if options.DoneCallback != nil {
-			go options.DoneCallback(channel)
+			options.DoneCallback(channel)
 		}
 	}
 	r.lock.RUnlock()
