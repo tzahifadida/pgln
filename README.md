@@ -8,6 +8,10 @@
   Therefor the technique we use is to rebuild the cache when it happens while holding the connection in listening mode, so we do not lose any new notifications.
   The library has an out-of-sync BLOCKING callback to rebuild your state while not losing new notifications.
 
+## Use Case
+
+Please read the following article on LinkedIn: [Link to Article](https://www.linkedin.com/pulse/pgln-postgresql-listennotify-tzahi-fadida--q0nwf)
+
 ## Install
 
 	go get github.com/tzahifadida/pgln
