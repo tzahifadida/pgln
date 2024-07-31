@@ -3,7 +3,7 @@ package pgln_test
 import (
 	"context"
 	"fmt"
-	"pgln"
+	"github.com/tzahifadida/pgln"
 	"strings"
 	"sync"
 	"testing"
