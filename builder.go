@@ -14,8 +14,8 @@ import (
 
 // NotifyQueryResult represents the result of a NotifyQuery call.
 type NotifyQueryResult struct {
-	Query  string   // The SQL query to be executed
-	Params []string // The parameters for the query
+	Query  string // The SQL query to be executed
+	Params []any  // The parameters for the query
 }
 
 // PGListenNotify handles listening and notifying operations.
@@ -341,7 +341,7 @@ func (r *PGListenNotify) Notify(channel string, payload string) error {
 func (r *PGListenNotify) NotifyQuery(channel string, payload string) NotifyQueryResult {
 	return NotifyQueryResult{
 		Query:  "SELECT pg_notify($1, $2)",
-		Params: []string{channel, payload},
+		Params: []any{channel, payload},
 	}
 }
 

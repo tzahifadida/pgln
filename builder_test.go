@@ -289,7 +289,7 @@ func TestNotifyQuery(t *testing.T) {
 
 	result := ln.NotifyQuery(testChannel, testPayload)
 	assert.Equal(t, "SELECT pg_notify($1, $2)", result.Query)
-	assert.Equal(t, []string{testChannel, testPayload}, result.Params)
+	assert.Equal(t, []any{testChannel, testPayload}, result.Params)
 
 	// Test executing the query
 	pool, err := pgxpool.New(ctx, connectionString)
