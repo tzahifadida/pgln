@@ -57,7 +57,6 @@ func main() {
         return
     }
 	err = r.Start()
-	require.NoError(t, err)
 	if err != nil {
 		fmt.Printf("Start error: %v\n", err)
 		return
