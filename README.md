@@ -56,11 +56,11 @@ func main() {
         fmt.Printf("Build error: %v\n", err)
         return
     }
-	err = r.Start()
-	if err != nil {
-		fmt.Printf("Start error: %v\n", err)
-		return
-	}
+    err = r.Start()
+    if err != nil {
+        fmt.Printf("Start error: %v\n", err)
+        return
+    }
 	
     defer r.Shutdown()
 
