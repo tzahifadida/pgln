@@ -2,6 +2,10 @@
 
 A robust PostgreSQL Listen/Notify library built on top of [pgx](https://github.com/jackc/pgx).
 
+⭐️ Please Star This Project
+
+If you find this project useful, please consider giving it a star ⭐️ on GitHub. It helps others find the project and shows your support!
+
 ## Motivation
 
 PostgreSQL's Listen/Notify feature provides a basic pub/sub mechanism. One common use case is simple cache synchronization for downstream services without the need for additional services like Redis or RabbitMQ.
