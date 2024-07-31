@@ -1,99 +1,126 @@
-# pgln - A Postgresql Listen/Notify library that uses [pgx](https://github.com/jackc/pgx) as the underline driver
+# pgln - PostgreSQL Listen/Notify Library
+
+A robust PostgreSQL Listen/Notify library built on top of [pgx](https://github.com/jackc/pgx).
 
 ## Motivation
 
-  Postgresql Listen/Notify is a kind of rudimentary pub/sub.
-  One such usage is a simple cache synchronization to downstream services without adding more services like redis/rabbitmq.
-  The problem is that when the connection disconnects you lose notifications because it does not store notifications.
-  Therefor the technique we use is to rebuild the cache when it happens while holding the connection in listening mode, so we do not lose any new notifications.
-  The library has an out-of-sync BLOCKING callback to rebuild your state while not losing new notifications.
+PostgreSQL's Listen/Notify feature provides a basic pub/sub mechanism. One common use case is simple cache synchronization for downstream services without the need for additional services like Redis or RabbitMQ.
+
+However, when a connection disconnects, notifications are lost as PostgreSQL doesn't store them. This library addresses this issue by providing an out-of-sync BLOCKING callback to rebuild your state while maintaining an active listening connection, ensuring no new notifications are missed.
 
 ## Use Case
 
-Please read the following article on LinkedIn: [Link to Article](https://www.linkedin.com/pulse/pgln-postgresql-listennotify-tzahi-fadida--q0nwf)
+For a detailed explanation of use cases and implementation details, please read our article on LinkedIn: [PGLN: PostgreSQL Listen/Notify](https://www.linkedin.com/pulse/pgln-postgresql-listennotify-tzahi-fadida--q0nwf)
+Please note the examples are more current in this repository, as the code continues to improve.
 
-## Install
-
-	go get github.com/tzahifadida/pgln
-
-## Example
+## Installation
 
 ```
+go get github.com/tzahifadida/pgln
+```
+
+## Features
+
+- Supports any connection string compatible with pgxpool
+- Custom pgxpool configuration
+- Automatic reconnection
+- Single connection for multiple Listen channels (Notify operations acquire, use, and release an additional connection)
+- Out-of-sync callback for reconnects, allowing cache rebuilding without losing notifications
+- Support for `LISTEN` and `NOTIFY` operations
+
+## Example Usage
+
+```go
 package main
 
 import (
-	"context"
-	"fmt"
-	"github.com/tzahifadida/pgln"
-	"os"
-	"strings"
-	"time"
+    "context"
+    "fmt"
+    "github.com/tzahifadida/pgln"
+    "os"
+    "strings"
+    "time"
 )
 
 func main() {
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	builder := pgln.NewPGListenNotifyBuilder().
-		SetContext(ctx).
-		SetReconnectInterval(5000).
-		UseConnectionString(os.Getenv("PGLN_CONNECTION_STRING"))
+    ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+    defer cancel()
 
-	r, err := builder.Build()
-	if err != nil {
-		return
-	}
-	defer r.Close()
-	err = r.Listen("pgln_foo", pgln.ListenOptions{
-		NotificationCallback: func(channel string, payload string) {
-			fmt.Printf("notification: %s - %s\n", channel, payload)
-			cancel()
-		},
-		DoneCallback: func(channel string) {
-			fmt.Printf("done: %s\n", channel)
-		},
-		ErrorCallback: func(channel string, err error) {
-			if !strings.Contains(err.Error(), "context canceled") {
-				fmt.Printf("error: %s - %s\n", channel, err)
-				cancel()
-			}
-		},
-		OutOfSyncBlockingCallback: func(channel string) error {
-			fmt.Printf("out-of-sync: %s\n", channel)
-			err = r.Notify("pgln_foo", "working fine")
-			if err != nil {
-				cancel()
-			}
-			return nil
-		},
-	})
-	if err != nil {
-		return
-	}
+    builder := pgln.NewPGListenNotifyBuilder().
+        SetContext(ctx).
+        SetReconnectInterval(5 * time.Second).
+        UseConnectionString(os.Getenv("PGLN_CONNECTION_STRING"))
 
-	select {
-	case <-ctx.Done():
+    r, err := builder.Build()
+    if err != nil {
+        fmt.Printf("Build error: %v\n", err)
+        return
+    }
+	err = r.Start()
+	require.NoError(t, err)
+	if err != nil {
+		fmt.Printf("Start error: %v\n", err)
 		return
 	}
+	
+    defer r.Shutdown()
+
+	// This blocks until listening started. You can opt for Listen() for non-blocking...
+	// Look inside ListenAndWaitForListening for usage...
+    err = r.ListenAndWaitForListening("pgln_foo", pgln.ListenOptions{
+        NotificationCallback: func(channel string, payload string) {
+            fmt.Printf("Notification: %s - %s\n", channel, payload)
+            cancel()
+        },
+        DoneCallback: func(channel string) {
+            fmt.Printf("Done: %s\n", channel)
+        },
+        ErrorCallback: func(channel string, err error) {
+            if !strings.Contains(err.Error(), "context canceled") {
+                fmt.Printf("Error: %s - %s\n", channel, err)
+                cancel()
+            }
+        },
+        OutOfSyncBlockingCallback: func(channel string) error {
+            fmt.Printf("Out-of-sync: %s\n", channel)
+            err = r.Notify("pgln_foo", "working fine")
+            if err != nil {
+                cancel()
+            }
+            return nil
+        },
+    })
+    if err != nil {
+        fmt.Printf("Listen error: %v\n", err)
+        return
+    }
+
+    <-ctx.Done()
 }
 ```
-## Features
 
-* Any connection string that pgxpool supports, and you can set your custom pgxpool directly.
-* Reconnects automatically
-* Only 1 connection is held for all the Listen channels (notify acquires an additional connection, sends and releases)
-* Have an out-of-sync callback for reconnects while holding a listener, so you can rebuild caches without losing notifications. 
-* Notifications: `LISTEN`/`NOTIFY`
+## Testing
 
-## Usage
+Run tests using the `go test` command.
 
-See the builder_test.go for an example
+For more detailed examples, refer to `builder_test.go` in the repository.
 
-## Tests
+## Status and Support
 
-`go test` is used for testing. Please note that the connection string is provided as an environment variable: PGLN_CONNECTION_STRING
+This library uses pgxpool as the underlying driver. For issues related to the driver itself, please contact the pgx maintainers.
 
-## Status
+For questions or issues specific to pgln that are not related to the pgxpool driver, feel free to open an issue in this repository.
 
-Because this library uses pgxpool as the underlying driver, you can contact pgx for any issue with the driver.
-Feel free to contact for anything related to the pgln that is not related to the pgxpool driver.
-Community members are encouraged to help each other with reported issues.
+Community contributions and help with reported issues are welcome and encouraged.
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+---
+
+We hope you find pgln useful for your PostgreSQL Listen/Notify needs. If you have any questions, suggestions, or encounter any issues, please don't hesitate to open an issue or contribute to the project.
