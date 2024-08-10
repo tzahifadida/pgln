@@ -74,6 +74,9 @@ type ListenOptions struct {
 	executedListen            bool
 	unListenRequested         bool
 	listeningStarted          chan error
+	unListenComplete          chan struct{}
+	listeningStartedMu        sync.Mutex
+	listeningStartedClosed    bool
 }
 
 // PGListenNotifyBuilder builds a PGListenNotify structure you can use to listen for new notifications.
@@ -243,26 +246,54 @@ func (r *PGListenNotify) Start() error {
 
 // Shutdown releases resources that were created internally.
 func (r *PGListenNotify) Shutdown() {
-	if r.cancelContextFunc != nil {
-		r.cancelContextFunc()
+	r.lock.RLock()
+	contextFunc := r.cancelContextFunc
+	pool := r.pool
+	r.lock.RUnlock()
+	if contextFunc != nil {
+		contextFunc()
 	}
-	if r.pool != nil {
-		r.pool.Close()
+	if pool != nil {
+		pool.Close()
 	}
 }
 
 // UnListen stops listening for the specified channel.
-func (r *PGListenNotify) UnListen(channel string) error {
+// It returns a channel that will be closed when the unlisten operation is complete.
+func (r *PGListenNotify) UnListen(channel string) (chan struct{}, error) {
 	r.lock.Lock()
 	defer r.lock.Unlock()
 	options, ok := r.channels[channel]
 	if !ok {
-		return fmt.Errorf("could not locate channel: %s", channel)
+		return nil, fmt.Errorf("unlisten failed: channel not found: %s", channel)
 	}
+	if options.unListenRequested {
+		return nil, fmt.Errorf("unlisten failed: channel already marked for unlisten: %s", channel)
+	}
+
 	options.unListenRequested = true
+	if options.unListenComplete == nil {
+		options.unListenComplete = make(chan struct{})
+	}
 	r.channelsChanged = true
 	go r.wakeupOwnChannel()
-	return nil
+	return options.unListenComplete, nil
+}
+
+// UnlistenAndWaitForUnlistening stops listening for the specified channel and waits until it's completely removed.
+// This function is important for safe shutdown as it ensures that no more notifications will be processed for this channel.
+func (r *PGListenNotify) UnlistenAndWaitForUnlistening(channel string) error {
+	unlistenComplete, err := r.UnListen(channel)
+	if err != nil {
+		return fmt.Errorf("failed to initiate unlisten: %w", err)
+	}
+
+	select {
+	case <-unlistenComplete:
+		return nil
+	case <-r.ctx.Done():
+		return fmt.Errorf("unlisten wait interrupted: %w", r.ctx.Err())
+	}
 }
 
 // wakeupOwnChannel releases the wait for notifications, so we can start listening for the new channel.
@@ -296,6 +327,7 @@ func (r *PGListenNotify) Listen(channel string, options ListenOptions) (chan err
 	optionsCopy := options
 	optionsCopy.channel = channel
 	optionsCopy.listeningStarted = make(chan error, 1)
+	optionsCopy.listeningStartedClosed = false
 	r.lock.Lock()
 	defer r.lock.Unlock()
 	r.channelsChanged = true
@@ -347,14 +379,16 @@ func (r *PGListenNotify) NotifyQuery(channel string, payload string) NotifyQuery
 
 // startMonitoring begins the main monitoring loop for notifications.
 func (r *PGListenNotify) startMonitoring() {
+	// we are out of sync after the first wait and disconnections so let's avoid the first one.
+	postFirstStartEver := false
 	waitForNotificationAndInitiateListens := func(conn *pgxpool.Conn) error {
-		started := true
+		justStartedWaits := true
 		for {
 			var outOfSyncCalls []ListenOptions
 			r.lock.RLock()
 			channelsChanged := r.channelsChanged
 			r.lock.RUnlock()
-			if channelsChanged || started {
+			if channelsChanged || justStartedWaits {
 				var addChannels []*ListenOptions
 				var removeChannels []string
 				r.lock.Lock()
@@ -363,7 +397,7 @@ func (r *PGListenNotify) startMonitoring() {
 					if options.unListenRequested {
 						removeChannels = append(removeChannels, options.channel)
 					}
-					if !options.executedListen || started {
+					if !options.executedListen || justStartedWaits {
 						options.executedListen = true
 						addChannels = append(addChannels, options)
 					}
@@ -372,13 +406,14 @@ func (r *PGListenNotify) startMonitoring() {
 					if r.channels[channel].DoneCallback != nil {
 						r.channels[channel].DoneCallback(channel)
 					}
+					close(r.channels[channel].unListenComplete)
 					delete(r.channels, channel)
 				}
 				for _, options := range r.channels {
 					outOfSyncCalls = append(outOfSyncCalls, *options)
 				}
 				r.lock.Unlock()
-				if started {
+				if justStartedWaits {
 					_, err := conn.Exec(r.ctx, fmt.Sprintf("LISTEN %s", pgx.Identifier{r.ownChannel}.Sanitize()))
 					if err != nil {
 						return fmt.Errorf("failed to listen on own channel: %w", err)
@@ -387,14 +422,12 @@ func (r *PGListenNotify) startMonitoring() {
 				for _, channelOptions := range addChannels {
 					_, err := conn.Exec(r.ctx, fmt.Sprintf("LISTEN %s", pgx.Identifier{channelOptions.channel}.Sanitize()))
 					if err != nil {
-						channelOptions.listeningStarted <- err
-						close(channelOptions.listeningStarted)
+						r.safeCloseListeningStarted(channelOptions, err)
 						return fmt.Errorf("failed to listen on channel %s: %w", channelOptions.channel, err)
 					}
-					channelOptions.listeningStarted <- nil
-					close(channelOptions.listeningStarted)
+					r.safeCloseListeningStarted(channelOptions, nil)
 				}
-				if !started {
+				if !justStartedWaits {
 					for _, channel := range removeChannels {
 						_, err := conn.Exec(r.ctx, fmt.Sprintf("UNLISTEN %s", pgx.Identifier{channel}.Sanitize()))
 						if err != nil {
@@ -409,15 +442,19 @@ func (r *PGListenNotify) startMonitoring() {
 				return nil
 			default:
 			}
-			if started && len(outOfSyncCalls) > 0 {
-				for _, options := range outOfSyncCalls {
-					if options.OutOfSyncBlockingCallback != nil && !options.unListenRequested {
-						err := options.OutOfSyncBlockingCallback(options.channel)
-						if err != nil {
-							return fmt.Errorf("out of sync callback failed for channel %s: %w", options.channel, err)
+			if postFirstStartEver {
+				if justStartedWaits && len(outOfSyncCalls) > 0 {
+					for _, options := range outOfSyncCalls {
+						if options.OutOfSyncBlockingCallback != nil && !options.unListenRequested {
+							err := options.OutOfSyncBlockingCallback(options.channel)
+							if err != nil {
+								return fmt.Errorf("out of sync callback failed for channel %s: %w", options.channel, err)
+							}
 						}
 					}
 				}
+			} else {
+				postFirstStartEver = true
 			}
 			select {
 			case <-r.ctx.Done():
@@ -429,15 +466,13 @@ func (r *PGListenNotify) startMonitoring() {
 				return fmt.Errorf("failed waiting for notification: %w", err)
 			}
 			r.lock.RLock()
-			for channel, options := range r.channels {
-				if n.Channel == channel {
-					if options.NotificationCallback != nil && !options.unListenRequested {
-						options.NotificationCallback(channel, n.Payload)
-					}
+			if options, ok := r.channels[n.Channel]; ok && !options.unListenRequested {
+				if options.NotificationCallback != nil {
+					options.NotificationCallback(n.Channel, n.Payload)
 				}
 			}
 			r.lock.RUnlock()
-			started = false
+			justStartedWaits = false
 		}
 	}
 
@@ -479,10 +514,22 @@ func (r *PGListenNotify) startMonitoring() {
 // callDoneCallbacks invokes the DoneCallback for all channels.
 func (r *PGListenNotify) callDoneCallbacks() {
 	r.lock.RLock()
+	defer r.lock.RUnlock()
 	for channel, options := range r.channels {
 		if options.DoneCallback != nil {
 			options.DoneCallback(channel)
 		}
 	}
-	r.lock.RUnlock()
+}
+
+// safeCloseListeningStarted safely closes the listeningStarted channel
+func (r *PGListenNotify) safeCloseListeningStarted(options *ListenOptions, err error) {
+	options.listeningStartedMu.Lock()
+	defer options.listeningStartedMu.Unlock()
+
+	if !options.listeningStartedClosed {
+		options.listeningStarted <- err
+		close(options.listeningStarted)
+		options.listeningStartedClosed = true
+	}
 }

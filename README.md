@@ -32,6 +32,27 @@ go get github.com/tzahifadida/pgln
 - Out-of-sync callback for reconnects, allowing cache rebuilding without losing notifications
 - Support for `LISTEN` and `NOTIFY` operations
 - Transaction-safe notify operations with `NotifyQuery`
+- Safe unlisten operations with completion signaling
+- Blocking callbacks, giving users full control over concurrency management
+
+## Important Note on Callbacks
+
+All callbacks provided to this library (NotificationCallback, DoneCallback, ErrorCallback, and OutOfSyncBlockingCallback) are **BLOCKING**. This means that when a callback is invoked, it will block the library's internal operations until the callback completes.
+
+It is the responsibility of the library user to decide whether to perform operations synchronously within the callback or to use goroutines for concurrent execution. If you need to perform long-running or potentially blocking operations in a callback, consider wrapping the operation in a goroutine to avoid blocking the library's internal processes.
+
+Example of non-blocking callback usage:
+
+```go
+NotificationCallback: func(channel string, payload string) {
+    go func() {
+        // Perform potentially long-running operations here
+        processNotification(channel, payload)
+    }()
+},
+```
+
+By making callbacks blocking, this library provides you with full control over concurrency management and the ability to ensure operations are completed before proceeding, if necessary.
 
 ## Major Methods and Usage
 
@@ -57,15 +78,16 @@ builder := pgln.NewPGListenNotifyBuilder()
 
 - `Start()`: Starts the listening process. Must be called before any Listen operations.
 - `Shutdown()`: Gracefully shuts down the PGListenNotify instance.
-- `Listen(channel string, options ListenOptions)`: Starts listening on a channel (non-blocking).
-- `ListenAndWaitForListening(channel string, options ListenOptions)`: Starts listening on a channel and waits for it to be ready (blocking).
-- `UnListen(channel string)`: Stops listening on a channel.
-- `Notify(channel string, payload string)`: Sends a notification to a channel.
-- `NotifyQuery(channel string, payload string)`: Returns a query and parameters for sending a notification within a transaction.
+- `Listen(channel string, options ListenOptions) (chan error, error)`: Starts listening on a channel (non-blocking).
+- `ListenAndWaitForListening(channel string, options ListenOptions) error`: Starts listening on a channel and waits for it to be ready (blocking).
+- `UnListen(channel string) (chan struct{}, error)`: Stops listening on a channel and returns a channel that will be closed when the unlisten operation is complete.
+- `UnlistenAndWaitForUnlistening(channel string) error`: Stops listening on a channel and waits until it's completely removed (blocking).
+- `Notify(channel string, payload string) error`: Sends a notification to a channel.
+- `NotifyQuery(channel string, payload string) NotifyQueryResult`: Returns a query and parameters for sending a notification within a transaction.
 
 ## Example Usage
 
-This example demonstrates how to use the pgln library, including the use of `NotifyQuery` for transaction-safe notifications.
+This example demonstrates how to use the pgln library, including the use of `NotifyQuery` for transaction-safe notifications and proper error handling. It also shows how to use callbacks safely.
 
 ```go
 package main
@@ -105,22 +127,44 @@ func main() {
 		return
 	}
 
-	defer r.Shutdown()
+	defer func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+
+		err := r.UnlistenAndWaitForUnlistening("pgln_foo")
+		if err != nil {
+			if err == context.DeadlineExceeded {
+				fmt.Println("UnListen timed out")
+			} else if err != context.Canceled {
+				fmt.Printf("UnListen error: %v\n", err)
+			}
+		}
+		r.Shutdown()
+	}()
 
 	notificationReceived := make(chan string, 1)
 
 	err = r.ListenAndWaitForListening("pgln_foo", pgln.ListenOptions{
 		NotificationCallback: func(channel string, payload string) {
-			fmt.Printf("Notification received: %s - %s\n", channel, payload)
-			select {
-			case notificationReceived <- payload:
-			case <-ctx.Done():
-			}
+			// This callback is blocking. For long-running operations, consider using a goroutine:
+			go func() {
+				fmt.Printf("Notification received: %s - %s\n", channel, payload)
+				select {
+				case notificationReceived <- payload:
+				default:
+					fmt.Println("Notification channel full, discarding payload")
+				}
+			}()
 		},
 		ErrorCallback: func(channel string, err error) {
 			if !strings.Contains(err.Error(), "context canceled") {
 				fmt.Printf("Error: %s - %s\n", channel, err)
 			}
+		},
+		OutOfSyncBlockingCallback: func(channel string) error {
+			// This callback is intentionally blocking to ensure sync before proceeding
+			fmt.Printf("Out-of-sync: %s\n", channel)
+			return nil
 		},
 	})
 	if err != nil {
@@ -142,6 +186,7 @@ func main() {
 		fmt.Printf("Failed to begin transaction: %v\n", err)
 		return
 	}
+	defer tx.Rollback() // Rollback if not committed
 
 	// Use NotifyQuery to get the notification query
 	notifyQuery := r.NotifyQuery("pgln_foo", "Transaction notification")
@@ -151,7 +196,6 @@ func main() {
 	_, err = tx.ExecContext(ctx, notifyQuery.Query, notifyQuery.Params...)
 	if err != nil {
 		fmt.Printf("Failed to execute notify query: %v\n", err)
-		tx.Rollback()
 		return
 	}
 
@@ -172,8 +216,6 @@ func main() {
 	case <-ctx.Done():
 		fmt.Println("Context cancelled")
 	}
-
-	// We don't need to explicitly close the channel or wait for ctx.Done() here
 }
 ```
 
