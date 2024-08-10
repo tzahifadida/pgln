@@ -128,7 +128,7 @@ func main() {
 	}
 
 	defer func() {
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer shutdownCancel()
 
 		err := r.UnlistenAndWaitForUnlistening("pgln_foo")
