@@ -218,7 +218,22 @@ func (r *PGListenNotify) Start() error {
 		if err != nil {
 			return fmt.Errorf("failed to parse connection string: %w", err)
 		}
-
+		parseConfig, err := pgx.ParseConfig(r.connectionString)
+		if err != nil {
+			return fmt.Errorf("failed to parse connection string with pgx: %w", err)
+		}
+		if _, ok := parseConfig.Config.RuntimeParams["pool_max_conns"]; !ok {
+			config.MaxConns = 4
+		}
+		if _, ok := parseConfig.Config.RuntimeParams["pool_min_conns"]; !ok {
+			config.MinConns = 0
+		}
+		if _, ok := parseConfig.Config.RuntimeParams["pool_max_conn_lifetime"]; !ok {
+			config.MaxConnLifetime = 10 * 12 * 24 * time.Hour //preferably do not disconnect.
+		}
+		if _, ok := parseConfig.Config.RuntimeParams["pool_max_conn_idle_time"]; !ok {
+			config.MaxConnIdleTime = 5 * time.Minute //minimal impact on the connections
+		}
 		config.ConnConfig.ConnectTimeout = r.connectTimeout
 		config.HealthCheckPeriod = r.healthCheckTimeout
 
