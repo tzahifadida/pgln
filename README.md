@@ -6,6 +6,23 @@ A robust PostgreSQL Listen/Notify library built on top of [pgx](https://github.c
 
 If you find this project useful, please consider giving it a star ⭐️ on GitHub. It helps others find the project and shows your support!
 
+## Table of Contents
+- [Motivation](#motivation)
+- [Use Case](#use-case)
+- [Installation](#installation)
+- [Features](#features)
+- [Important Note on Callbacks](#important-note-on-callbacks)
+- [Major Methods and Usage](#major-methods-and-usage)
+    - [NewPGListenNotifyBuilder()](#newpglistennotifybuilder)
+    - [Builder Methods](#builder-methods)
+    - [PGListenNotify Methods](#pglistennotify-methods)
+- [Example Usage](#example-usage)
+    - [Important Note on NotifyQuery](#important-note-on-notifyquery)
+- [Testing](#testing)
+- [Status and Support](#status-and-support)
+- [Contributing](#contributing)
+- [License](#license)
+
 ## Motivation
 
 PostgreSQL's Listen/Notify feature provides a basic pub/sub mechanism. One common use case is simple cache synchronization for downstream services without the need for additional services like Redis or RabbitMQ.
@@ -25,8 +42,7 @@ go get github.com/tzahifadida/pgln
 
 ## Features
 
-- Supports any connection string compatible with pgxpool
-- Custom pgxpool configuration
+- Supports `*sql.DB` connections using the pgx driver in stdlib mode
 - Automatic reconnection
 - Single connection for multiple Listen channels (Notify operations acquire, use, and release an additional connection)
 - Out-of-sync callback for reconnects, allowing cache rebuilding without losing notifications
@@ -45,10 +61,10 @@ Example of non-blocking callback usage:
 
 ```go
 NotificationCallback: func(channel string, payload string) {
-    go func() {
-        // Perform potentially long-running operations here
-        processNotification(channel, payload)
-    }()
+go func() {
+// Perform potentially long-running operations here
+processNotification(channel, payload)
+}()
 },
 ```
 
@@ -67,10 +83,8 @@ builder := pgln.NewPGListenNotifyBuilder()
 ### Builder Methods
 
 - `SetContext(ctx context.Context)`: Sets the context for the PGListenNotify instance.
-- `UseConnectionString(connectionString string)`: Sets the PostgreSQL connection string.
-- `SetPool(pool *pgxpool.Pool)`: Sets a custom connection pool.
+- `SetDB(db *sql.DB)`: Sets the database connection (must be a *sql.DB using pgx driver).
 - `SetReconnectInterval(reconnectInterval time.Duration)`: Sets the interval for reconnection attempts.
-- `SetConnectTimeout(timeout time.Duration)`: Sets the timeout for connection attempts.
 - `SetHealthCheckTimeout(timeout time.Duration)`: Sets the timeout for health checks.
 - `Build()`: Builds and returns the PGListenNotify instance.
 
@@ -109,12 +123,19 @@ func main() {
 
 	connectionString := os.Getenv("PGLN_CONNECTION_STRING")
 
+	// Open a database connection using pgx driver
+	db, err := sql.Open("pgx", connectionString)
+	if err != nil {
+		fmt.Printf("Failed to open database: %v\n", err)
+		return
+	}
+	defer db.Close()
+
 	builder := pgln.NewPGListenNotifyBuilder().
 		SetContext(ctx).
 		SetReconnectInterval(5 * time.Second).
-		SetConnectTimeout(10 * time.Second).
 		SetHealthCheckTimeout(2 * time.Second).
-		UseConnectionString(connectionString)
+		SetDB(db)
 
 	r, err := builder.Build()
 	if err != nil {
@@ -172,14 +193,6 @@ func main() {
 		return
 	}
 
-	// Open a database connection
-	db, err := sql.Open("pgx", connectionString)
-	if err != nil {
-		fmt.Printf("Failed to open database: %v\n", err)
-		return
-	}
-	defer db.Close()
-
 	// Start a transaction
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -192,7 +205,6 @@ func main() {
 	notifyQuery := r.NotifyQuery("pgln_foo", "Transaction notification")
 
 	// Execute the notification query within the transaction
-	// This is crucial: the notification will only be sent if the transaction is committed
 	_, err = tx.ExecContext(ctx, notifyQuery.Query, notifyQuery.Params...)
 	if err != nil {
 		fmt.Printf("Failed to execute notify query: %v\n", err)
@@ -200,7 +212,6 @@ func main() {
 	}
 
 	// Commit the transaction
-	// The notification will be sent only after this commit succeeds
 	err = tx.Commit()
 	if err != nil {
 		fmt.Printf("Failed to commit transaction: %v\n", err)
@@ -238,9 +249,9 @@ For more detailed examples, refer to `builder_test.go` in the repository.
 
 ## Status and Support
 
-This library uses pgxpool as the underlying driver. For issues related to the driver itself, please contact the pgx maintainers.
+This library uses the pgx driver in stdlib mode. For issues related to the driver itself, please contact the pgx maintainers.
 
-For questions or issues specific to pgln that are not related to the pgxpool driver, feel free to open an issue in this repository.
+For questions or issues specific to pgln that are not related to the pgx driver, feel free to open an issue in this repository.
 
 Community contributions and help with reported issues are welcome and encouraged.
 

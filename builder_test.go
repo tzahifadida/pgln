@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
@@ -61,23 +60,18 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
-	sharedConnectionString = fmt.Sprintf("postgres://testuser:testpass@localhost:%s/testdb?pool_max_conns=200", port.Port())
+	sharedConnectionString = fmt.Sprintf("postgres://testuser:testpass@localhost:%s/testdb", port.Port())
 
 	// Implement retry mechanism with exponential backoff
 	maxRetries := 5
-	var pool *pgxpool.Pool
+	var db *sql.DB
 	for i := 0; i < maxRetries; i++ {
-		config, err := pgxpool.ParseConfig(sharedConnectionString)
+		db, err = sql.Open("pgx", sharedConnectionString)
 		if err == nil {
-			config.MaxConns = 200
-			pool, err = pgxpool.NewWithConfig(ctx, config)
+			// Ensure connection is working
+			err = db.Ping()
 			if err == nil {
-				defer pool.Close() // Moved here as requested
-				// Ensure connection is working
-				err = pool.Ping(ctx)
-				if err == nil {
-					break
-				}
+				break
 			}
 		}
 		if i < maxRetries-1 { // Don't sleep on the last attempt
@@ -90,6 +84,7 @@ func TestMain(m *testing.M) {
 		fmt.Printf("Failed to connect to database after multiple retries: %s", err)
 		os.Exit(1)
 	}
+	defer db.Close()
 
 	// Run the tests
 	exitCode := m.Run()
@@ -98,25 +93,27 @@ func TestMain(m *testing.M) {
 	os.Exit(exitCode)
 }
 
-// Use this function in your tests to get the connection string
-func getTestConnectionString(t *testing.T) string {
+// Use this function in your tests to get a new database connection
+func getTestDB(t *testing.T) *sql.DB {
 	t.Helper()
-	require.NotEmpty(t, sharedConnectionString, "Shared connection string is not set")
-	return sharedConnectionString
+	db, err := sql.Open("pgx", sharedConnectionString)
+	db.SetMaxOpenConns(200)
+	require.NoError(t, err)
+	return db
 }
 
 func TestPGListenNotify(t *testing.T) {
-	connectionString := getTestConnectionString(t)
-
 	t.Run("Basic Listen and Notify", func(t *testing.T) {
 		t.Parallel()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
+		db := getTestDB(t)
+		defer db.Close()
+
 		builder := pgln.NewPGListenNotifyBuilder()
-		ln, err := builder.UseConnectionString(connectionString).
+		ln, err := builder.SetDB(db).
 			SetContext(ctx).
-			SetConnectTimeout(5 * time.Second).
 			SetHealthCheckTimeout(2 * time.Second).
 			Build()
 		require.NoError(t, err)
@@ -155,8 +152,11 @@ func TestPGListenNotify(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
+		db := getTestDB(t)
+		defer db.Close()
+
 		builder := pgln.NewPGListenNotifyBuilder()
-		ln, err := builder.UseConnectionString(connectionString).SetContext(ctx).Build()
+		ln, err := builder.SetDB(db).SetContext(ctx).Build()
 		require.NoError(t, err)
 		err = ln.Start()
 		require.NoError(t, err)
@@ -208,8 +208,11 @@ func TestPGListenNotify(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
+		db := getTestDB(t)
+		defer db.Close()
+
 		builder := pgln.NewPGListenNotifyBuilder()
-		ln, err := builder.UseConnectionString(connectionString).SetContext(ctx).Build()
+		ln, err := builder.SetDB(db).SetContext(ctx).Build()
 		require.NoError(t, err)
 		err = ln.Start()
 		require.NoError(t, err)
@@ -248,8 +251,11 @@ func TestPGListenNotify(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 
+		db := getTestDB(t)
+		defer db.Close()
+
 		builder := pgln.NewPGListenNotifyBuilder()
-		ln, err := builder.UseConnectionString(connectionString).SetContext(ctx).Build()
+		ln, err := builder.SetDB(db).SetContext(ctx).Build()
 		require.NoError(t, err)
 		err = ln.Start()
 		require.NoError(t, err)
@@ -289,13 +295,15 @@ func TestPGListenNotify(t *testing.T) {
 }
 
 func TestResilienceToConnectionDrops(t *testing.T) {
-	connectionString := getTestConnectionString(t)
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
+	db := getTestDB(t)
+	defer db.Close()
+
 	builder := pgln.NewPGListenNotifyBuilder()
-	ln, err := builder.UseConnectionString(connectionString).
+	ln, err := builder.SetDB(db).
 		SetContext(ctx).
 		SetReconnectInterval(1 * time.Second).
 		Build()
@@ -335,7 +343,7 @@ func TestResilienceToConnectionDrops(t *testing.T) {
 	}
 
 	// Simulate a connection drop by forcibly closing all connections
-	err = dropAllConnections(connectionString)
+	err = dropAllConnections(sharedConnectionString)
 	require.NoError(t, err)
 
 	// Wait for reconnection
@@ -361,13 +369,14 @@ func TestResilienceToConnectionDrops(t *testing.T) {
 }
 
 func TestNotifyQuery(t *testing.T) {
-	connectionString := getTestConnectionString(t)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	db := getTestDB(t)
+	defer db.Close()
+
 	builder := pgln.NewPGListenNotifyBuilder()
-	ln, err := builder.UseConnectionString(connectionString).SetContext(ctx).Build()
+	ln, err := builder.SetDB(db).SetContext(ctx).Build()
 	require.NoError(t, err)
 	err = ln.Start()
 	require.NoError(t, err)
@@ -379,11 +388,6 @@ func TestNotifyQuery(t *testing.T) {
 	result := ln.NotifyQuery(testChannel, testPayload)
 	assert.Equal(t, "SELECT pg_notify($1, $2)", result.Query)
 	assert.Equal(t, []any{testChannel, testPayload}, result.Params)
-
-	// Test executing the query
-	pool, err := pgxpool.New(ctx, connectionString)
-	require.NoError(t, err)
-	defer pool.Close()
 
 	notificationReceived := make(chan string, 1)
 	err = ln.ListenAndWaitForListening(testChannel, pgln.ListenOptions{
@@ -397,7 +401,7 @@ func TestNotifyQuery(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	_, err = pool.Exec(ctx, result.Query, result.Params[0], result.Params[1])
+	_, err = db.ExecContext(ctx, result.Query, result.Params[0], result.Params[1])
 	require.NoError(t, err)
 
 	select {
@@ -409,22 +413,26 @@ func TestNotifyQuery(t *testing.T) {
 }
 
 func TestReadmeExample(t *testing.T) {
-	connectionString := getTestConnectionString(t)
-	connectionString = strings.ReplaceAll(connectionString, "pool_max_conns=200", "")
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
+
+	connectionString := sharedConnectionString
+
+	// Open a database connection using pgx driver
+	db, err := sql.Open("pgx", connectionString)
+	require.NoError(t, err, "Failed to open database")
+	defer db.Close()
 
 	builder := pgln.NewPGListenNotifyBuilder().
 		SetContext(ctx).
 		SetReconnectInterval(5 * time.Second).
-		SetConnectTimeout(10 * time.Second).
 		SetHealthCheckTimeout(2 * time.Second).
-		UseConnectionString(connectionString)
+		SetDB(db)
 
 	r, err := builder.Build()
-	require.NoError(t, err)
+	require.NoError(t, err, "Build error")
 	err = r.Start()
-	require.NoError(t, err)
+	require.NoError(t, err, "Start error")
 
 	defer func() {
 		_, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -467,16 +475,11 @@ func TestReadmeExample(t *testing.T) {
 			return nil
 		},
 	})
-	require.NoError(t, err)
-
-	// Open a database connection
-	db, err := sql.Open("pgx", connectionString)
-	require.NoError(t, err)
-	defer db.Close()
+	require.NoError(t, err, "Listen error")
 
 	// Start a transaction
 	tx, err := db.BeginTx(ctx, nil)
-	require.NoError(t, err)
+	require.NoError(t, err, "Failed to begin transaction")
 	defer tx.Rollback() // Rollback if not committed
 
 	// Use NotifyQuery to get the notification query
@@ -484,11 +487,11 @@ func TestReadmeExample(t *testing.T) {
 
 	// Execute the notification query within the transaction
 	_, err = tx.ExecContext(ctx, notifyQuery.Query, notifyQuery.Params...)
-	require.NoError(t, err)
+	require.NoError(t, err, "Failed to execute notify query")
 
 	// Commit the transaction
 	err = tx.Commit()
-	require.NoError(t, err)
+	require.NoError(t, err, "Failed to commit transaction")
 
 	// Wait for the notification or timeout
 	select {
@@ -504,13 +507,13 @@ func TestReadmeExample(t *testing.T) {
 // Helper function to drop all connections
 func dropAllConnections(connectionString string) error {
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, connectionString)
+	db, err := sql.Open("pgx", connectionString)
 	if err != nil {
 		return fmt.Errorf("failed to open database: %w", err)
 	}
-	defer pool.Close()
+	defer db.Close()
 
-	_, err = pool.Exec(ctx, `
+	_, err = db.ExecContext(ctx, `
 		SELECT pg_terminate_backend(pid)
 		FROM pg_stat_activity
 		WHERE pid <> pg_backend_pid()
@@ -521,4 +524,57 @@ func dropAllConnections(connectionString string) error {
 	}
 
 	return nil
+}
+
+func TestDelayedNotification(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	db := getTestDB(t)
+	defer db.Close()
+
+	builder := pgln.NewPGListenNotifyBuilder()
+	ln, err := builder.SetDB(db).SetContext(ctx).Build()
+	require.NoError(t, err)
+	err = ln.Start()
+	require.NoError(t, err)
+	defer ln.Shutdown()
+
+	testChannel := "delayed_notification_channel"
+	notificationReceived := make(chan string, 1)
+
+	// Start listening
+	err = ln.ListenAndWaitForListening(testChannel, pgln.ListenOptions{
+		NotificationCallback: func(channel string, payload string) {
+			select {
+			case notificationReceived <- payload:
+			default:
+				t.Log("Notification channel full, discarding payload")
+			}
+		},
+	})
+	require.NoError(t, err)
+
+	// Record the start time
+	startTime := time.Now()
+
+	// Send a delayed notification
+	go func() {
+		time.Sleep(10 * time.Second)
+		err := ln.Notify(testChannel, "delayed_payload")
+		if err != nil {
+			t.Errorf("Failed to send delayed notification: %v", err)
+		}
+	}()
+
+	// Wait for the notification
+	select {
+	case received := <-notificationReceived:
+		elapsedTime := time.Since(startTime)
+		assert.Equal(t, "delayed_payload", received)
+		assert.GreaterOrEqual(t, elapsedTime.Seconds(), 10.0, "Notification received too early")
+		assert.Less(t, elapsedTime.Seconds(), 11.0, "Notification received too late")
+	case <-ctx.Done():
+		t.Fatal("Timed out waiting for delayed notification")
+	}
 }
